@@ -11,10 +11,17 @@ TIMER0_RATE_WAIT      EQU 1000
 TIMER0_RELOAD_WAIT    EQU ((65536-(CLK/TIMER0_RATE_HIGH)))
 TIMER1_RATE           EQU 1000
 TIMER1_RELOAD         EQU ((65536-(CLK/TIMER1_RATE)))
+TIMER2_SERVO_RIGHT    EQU 500
+TIMER2_SERVO_LEFT     EQU 1000
+TIMER2_RELOAD_RIGHT   EQU ((65536-(CLK/TIMER2_SERVO_RIGHT)))
+TIMER2_RELOAD_LEFT    equ ((65536-(CLK/TIMER2_RELOAD_LEFT)))
 STEADY_STATE          EQU
+DISTANCE_THRESHOLD    EQU
 WINNING_SCORE         EQU 5
 SOUND_OUT             EQU P1.1
 SEED_GENERATOR        EQU P4.5
+SERVO                 EQU P0.3
+US_SENSOR             EQU P0.4
 
 ; Reset vector
 org 0000H
@@ -41,13 +48,17 @@ T1ov: ds 2
 T0ov: ds 0
 player1: ds 1
 player2: ds 1
+lives_left: ds 1
+guess_score: ds 1
 
 BSEG
 tone: dbit 1
+inc_or_dec: dbit 1
 mf: dbit 1
 game: dbit 1
 Go_To_Wait: dbit 1
 score_to_update: dbit 1
+direction: dbit 1
 
 $NOLIST
 $include(math32.inc)
@@ -70,6 +81,8 @@ Initial_Message_Bottom: db 'Player 2: 0', 0
 Clear:                  db '                ', 0
 Player1_Message:        db 'Player One Won!', 0
 Player2_Message:        db 'Player Two Won!', 0
+Guess_Player_Message:   db 'Player Score: 0', 0
+Lives_Message:          db 'Lives Left: 3', 0
 
 Display_10_digit_BCD:
     Display_BCD(bcd+4)
@@ -78,7 +91,6 @@ Display_10_digit_BCD:
 	Display_BCD(bcd+1)
 	Display_BCD(bcd+0)
 	ret
-
 
 ; Initializes timer/counter 0 as a 16-bit timer
 InitTimer0:
@@ -92,9 +104,9 @@ InitTimer0:
 	ret
 	
 Timer0_ISR:
-push acc
-push psw
-jz Go_To_Wait, Waiting_Period
+    push acc
+    push psw
+    jb Go_To_Wait, Waiting_Period
 	cpl SOUND_OUT
 	reti
 
@@ -152,6 +164,14 @@ InitTimer2:
 Timer2_ISR:
     clr TF2
     push acc
+    push psw
+    jnb game, Timer2_ISR_Counter
+
+Servo_Handler:
+    cpl SERVO
+    ljmp Timer2_ISR_Done
+
+Timer2_ISR_Counter:
     inc T2ov+0
     mov a, T2ov+0
     jnz Timer2_ISR_Done
@@ -159,6 +179,7 @@ Timer2_ISR:
 
 Timer2_ISR_Done:
     pop acc
+    pop psw
     reti
 
 ;---------------------------------;
@@ -232,6 +253,7 @@ Game_Select:
 	mov TH1, #-6
 	mov SCON, #50H
 	setb TR1
+
 Wait:
 	jnb RI, Wait
 	mov a, SBUF
@@ -247,12 +269,13 @@ Start:
     ; Initialize the hardware:
     mov SP, #7FH
     lcall Game_Select
-    lcall Initialize_All
+    lcall Initialize_All //check
     setb P0.0 ; Pin is used as input for timer 2
     setb P0.1 ; Pin is used as input for timer 1
-    jb mf, Rapid_Touch
+    jb mf, Guessing_Game
     
 Sound_Off:
+    clr game
     lcall Initial_Seed
     setb ET2
     Set_Cursor(1, 1)
@@ -275,6 +298,7 @@ Tone_Low:
 	; Set autoreload value
 	mov RH0, #high(TIMER0_RELOAD_LOW)
 	mov RL0, #low(TIMER0_RELOAD_LOW)
+    clr inc_or_dec
     lcall Wait_Random
     setb TR0
     sjmp Tone_Off
@@ -285,6 +309,7 @@ Tone_High:
     ; Set autoreload value
 	mov RH0, #high(TIMER0_RELOAD_HIGH)
 	mov RL0, #low(TIMER0_RELOAD_HIGH)
+    setb inc_or_dec
     lcall Wait_Random
     setb TR0
     sjmp Tone_Off
@@ -295,7 +320,7 @@ Tone_Off:
     Wait_Milli_Seconds(#100)
     clr TR0
 
-Wait_For_Input:
+Wait_For_Input_SO:
     setb Go_To_Wait
     mov TH0, #high(TIMER0_RELOAD_WAIT)
 	mov TL0, #low(TIMER0_RELOAD_WAIT)
@@ -306,7 +331,7 @@ Wait_For_Input:
     clr TF0
     setb TR0
 
-Waiting:
+Waiting_SO:
     clr TR1
     mov TL1, #0
     mov TH1, #0
@@ -388,21 +413,41 @@ Done_Waiting:
     jb score_to_update, Update_Player_1
 
 Update_Player_2:
-    inc player2
+    lcall Incremement_Score_P2
+Update_Display_Player_2:
     Set_Cursor(2, 11)
     Display_BCD(player2)
     clr Go_To_Wait
     sjmp Still_Waiting
 
+Incremement_Score_P2:
+    jnb inc_or_dec, Decrement_Score_P2
+    inc player2
+    ret
+
+Decrement_Score_P2:
+    dec player2
+    sjmp Update_Display_Player_2
+
 Update_Player_1:
-    inc player1
+    lcall Incremement_Score_P1
+Update_Display_Player_1:
     Set_Cursor(1, 11)
     Display_BCD(player1)
     clr Go_To_Wait
     sjmp Still_Waiting
 
+Incremement_Score_P1:
+    jnb inc_or_dec, Decrement_Score_P1
+    inc player1
+    ret
+
+Decrement_Score_P1:
+    dec player1
+    sjmp Update_Display_Player_1
+
 Still_Waiting:
-    jz Go_To_Wait, Waiting
+    jb Go_To_Wait, Waiting_SO
 ; At this point, the periods are stored in their respective register
 ; Determine what the steady state value is and compare the values
 ; stored in the registers to this steady state value to see whether
@@ -415,7 +460,7 @@ Still_Waiting:
 ; to their score. Clearing the Go_To_Wait bit might be the best way to
 ; go about this
 
-Continue:
+Continue_SO:
     clr TF0
     clr TR0
 
@@ -428,7 +473,10 @@ Check_Player2:
     cjne a, WINNING_SCORE, Game_Still_In_Progress
     ljmp Player_2_Won
 
-Game_Still_In_Progress
+Game_Still_In_Progress:
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
     ljmp Sound_Off_Forever
 
 
@@ -442,8 +490,84 @@ Player_2_Won:
     Send_Constant_String(#Player2_Message)
     sjmp Complete
     
-Rapid_Touch:
-	sjmp Rapid_Touch
+Guessing_Game:
+    setb game
+    clr Go_To_Wait
+	lcall Initial_Seed
+    setb ET2
+    Set_Cursor(1, 1)
+    Send_Constant_String(#Guess_Player_Message)
+    Set_Cursor(2, 1)
+    Send_Constant_String(#Lives_Message)
+    mov guess_score, #0
+    mov lives_left, #3
+
+Guessing_Game_Forever:
+    lcall Random
+    mov a, Seed+1
+    mov c, acc.3
+    mov direction, c
+    mov TH0, #high(TIMER0_RELOAD_LOW)
+	mov TL0, #low(TIMER0_RELOAD_LOW)
+	mov RH0, #high(TIMER0_RELOAD_LOW)
+	mov RL0, #low(TIMER0_RELOAD_LOW)
+    setb TR0
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#100)
+    clr TR0
+    jc Servo_Right
+    sjmp Servo_Left
+
+Servo_Right:
+    mov TH2, #high(TIMER2_RELOAD_RIGHT)
+    mov TL2, #low(TIMER2_RELOAD_RIGHT)
+    mov RCAP2H, #high(TIMER2_RELOAD_RIGHT)
+	mov RCAP2L, #low(TIMER2_RELOAD_RIGHT)
+    setb TR2
+    sjmp Wait_For_Input_GG
+
+Servo_Left:
+    mov TH2, #high(TIMER2_RELOAD_LEFT)
+    mov TL2, #low(TIMER2_RELOAD_LEFT)
+    mov RCAP2H, #high(TIMER2_RELOAD_LEFT)
+	mov RCAP2L, #low(TIMER2_RELOAD_LEFT)
+    setb TR2
+    sjmp Wait_For_Input_GG
+
+Wait_For_Input_GG:
+    setb Go_To_Wait
+    mov TH0, #high(TIMER0_RELOAD_WAIT)
+	mov TL0, #low(TIMER0_RELOAD_WAIT)
+    mov RH0, #0
+    mov RL0, #0
+    mov T0ov+0, #0
+    mov T0ov+1, #0
+    clr TF0
+    setb TR0
+
+Waiting_GG:
+    clr TR1
+    mov TL1, #0
+    mov TH1, #0
+    mov T1ov+0, #0
+    mov T1ov+1, #0
+    clr TF1
+    setb TR1
+
+Synch1_GG:
+    jb P0.4, Synch1_GG
+
+Synch2_GG:
+    jnb P0.4, Synch2_GG
+
+
+d
+    jb Go_To_Wait, Waiting_GG
+
+Continue_GG:
+    clr TF0
+    clr TR0
+
 
 Complete:
     sjmp Complete
