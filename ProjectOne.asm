@@ -3,24 +3,23 @@ $MODLP51
 $LIST
 
 CLK                   EQU 22118400 					
-TIMER0_RATE_LOW       EQU 2000   
+TIMER0_RATE_LOW       EQU 3900  
 TIMER0_RELOAD_LOW     EQU ((65536-(CLK/TIMER0_RATE_LOW)))  					
-TIMER0_RATE_HIGH      EQU 2100
+TIMER0_RATE_HIGH      EQU 4100
 TIMER0_RELOAD_HIGH    EQU ((65536-(CLK/TIMER0_RATE_HIGH)))
 TIMER0_RATE_WAIT      EQU 1000
-TIMER0_RELOAD_WAIT    EQU ((65536-(CLK/TIMER0_RATE_HIGH)))
+TIMER0_RELOAD_WAIT    EQU ((65536-(CLK/TIMER0_RATE_WAIT)))
 TIMER1_RATE           EQU 1000
 TIMER1_RELOAD         EQU ((65536-(CLK/TIMER1_RATE)))
 TIMER2_SERVO_RIGHT    EQU 500
 TIMER2_SERVO_LEFT     EQU 1000
 TIMER2_RELOAD_RIGHT   EQU ((65536-(CLK/TIMER2_SERVO_RIGHT)))
-TIMER2_RELOAD_LEFT    equ ((65536-(CLK/TIMER2_RELOAD_LEFT)))
-STEADY_STATE          EQU
-DISTANCE_THRESHOLD    EQU
+TIMER2_RELOAD_LEFT    EQU ((65536-(CLK/TIMER2_RELOAD_LEFT)))
+STEADY_STATE          EQU 73000000
 WINNING_SCORE         EQU 5
 SOUND_OUT             EQU P1.1
 SEED_GENERATOR        EQU P4.5
-SERVO                 EQU P0.3
+SERVO                 EQU P0.3	; may need to set this
 US_SENSOR             EQU P0.4
 
 ; Reset vector
@@ -50,15 +49,18 @@ player1: ds 1
 player2: ds 1
 lives_left: ds 1
 guess_score: ds 1
+test: ds 1
 
 BSEG
 tone: dbit 1
 inc_or_dec: dbit 1
 mf: dbit 1
-game: dbit 1
+game_or_guess: dbit 1
 Go_To_Wait: dbit 1
 score_to_update: dbit 1
 direction: dbit 1
+tone_select: dbit 1
+lockout: dbit 1
 
 $NOLIST
 $include(math32.inc)
@@ -67,22 +69,23 @@ $LIST
 
 CSEG
 ; These 'equ' must match the hardware wiring
-LCD_RS equ P2.6
+LCD_RS equ P3.2
 ;LCD_RW equ PX.X ; Not used in this code, connect the pin to GND
-LCD_E  equ P2.7
+LCD_E  equ P3.3
 LCD_D4 equ P3.4
 LCD_D5 equ P3.5
-LCD_D6 equ P2.5
-LCD_D7 equ P2.3
+LCD_D6 equ P3.6
+LCD_D7 equ P3.7
 
 
-Initial_Message_Top:    db 'Player 1: 0', 0
-Initial_Message_Bottom: db 'Player 2: 0', 0
+Initial_Message_Top:    db 'Player 1: 00', 0
+Initial_Message_Bottom: db 'Player 2: 00', 0
 Clear:                  db '                ', 0
 Player1_Message:        db 'Player One Won!', 0
 Player2_Message:        db 'Player Two Won!', 0
 Guess_Player_Message:   db 'Player Score: 0', 0
 Lives_Message:          db 'Lives Left: 3', 0
+Lost:                   db 'Game Lost!', 0
 
 Display_10_digit_BCD:
     Display_BCD(bcd+4)
@@ -93,22 +96,31 @@ Display_10_digit_BCD:
 	ret
 
 ; Initializes timer/counter 0 as a 16-bit timer
-InitTimer0:
+InitTimers01:
 	mov a, TMOD
 	anl a, #0x00
-	orl a, #0x01
+	orl a, #0x11
 	mov TMOD, a
-	setb ET0
-	; Disable timer so that transducer does not produce sound
+	mov TH1, #high(TIMER1_RELOAD)
+    mov TL1, #low(TIMER1_RELOAD)
+    mov RH1, #0
+    mov RL1, #0
 	clr TR0
+	clr TR1
+	clr TF0
+	clr TF1
+	setb ET0
+	setb ET1
 	ret
 	
 Timer0_ISR:
+	clr TF0
     push acc
     push psw
+    ; jb lockout ; Tentatively disabling this line
     jb Go_To_Wait, Waiting_Period
 	cpl SOUND_OUT
-	reti
+	sjmp Timer0_ISR_Done
 
 Waiting_Period:
     inc T0ov+0
@@ -118,29 +130,20 @@ Waiting_Period:
 
 Compare:
     mov a, T0ov+0
-    cjne a, #low(4000), Timer0_ISR_Done
+    cjne a, #low(3000), Timer0_ISR_Done
     mov a, T0ov+1
-    cjne a, #high(4000), Timer0_ISR_Done
+    cjne a, #high(3000), Timer0_ISR_Done
     clr Go_To_Wait
+    clr TR0
+    clr TF0
 
 Timer0_ISR_Done:
     pop acc
     pop psw
     reti
 
-InitTimer1:
-    mov a, TMOD
-    orl a, #0x10
-    mov TMOD, a
-    mov TH1, #high(TIMER1_RELOAD)
-    mov TL1, #low(TIMER1_RELOAD)
-    mov RH1, #0
-    mov RL1, #0
-    setb ET1
-    clr TR1
-    ret
-
 Timer1_ISR:
+	clr TF1
     push acc
     push psw
     inc T1ov+0
@@ -157,7 +160,7 @@ InitTimer2:
     mov T2CON, #0
     mov RCAP2H, #0
     mov RCAP2L, #0
-    clr ET2
+  	clr ET2
     clr TR2
     ret
 
@@ -165,7 +168,7 @@ Timer2_ISR:
     clr TF2
     push acc
     push psw
-    jnb game, Timer2_ISR_Counter
+    jnb game_or_guess, Timer2_ISR_Counter
 
 Servo_Handler:
     cpl SERVO
@@ -186,14 +189,13 @@ Timer2_ISR_Done:
 ; Hardware initialization         ;
 ;---------------------------------;
 Initialize_All:
-	lcall InitTimer0
-    lcall InitTimer1
+	lcall InitTimers01
     lcall InitTimer2
     lcall LCD_4BIT
-    setb EA
 	ret
 
 Initial_Seed:
+	clr ET2
 	setb TR2
     jb SEED_GENERATOR, $
     mov Seed+0, TH2
@@ -242,54 +244,57 @@ Wait_Random:
     Wait_Milli_Seconds(Seed+1)
     Wait_Milli_Seconds(Seed+2)
     Wait_Milli_Seconds(Seed+3)
-   	Wait_Milli_Seconds(Seed+0)
-    Wait_Milli_Seconds(Seed+1)
-    Wait_Milli_Seconds(Seed+2)
-    Wait_Milli_Seconds(Seed+3)
     ret
     
-Game_Select:
-	mov TMOD, #20H
-	mov TH1, #-6
-	mov SCON, #50H
-	setb TR1
-
+Receive_Serial:
+	setb P3.0											; Pull RX pin high
+	setb ET1											; Enable timer 1 interrupts
+	mov TMOD, #20H										; Timer 1 in mode 2 (auto reload)
+	mov TH1, #-6										; 115200 baud rate with our crystal
+	mov SCON, #50H										; Start bit is 0, Stop bit is 1, Rece
+	setb TR1											; start timer 1 for the generation of the baud rate
 Wait:
 	jnb RI, Wait
 	mov a, SBUF
-	mov x+0, a
-	mov x+1, #0
-	mov x+2, #0
-	mov x+3, #0
-	Load_y(#1)
-	lcall x_eq_y
+    jnz Update_Game_Or_Guess
+    clr game_or_guess
+    ret
+    
+Update_Game_Or_Guess:
+    setb game_or_guess
 	ret
 
 Start:
     ; Initialize the hardware:
-    mov SP, #7FH
-    lcall Game_Select
-    lcall Initialize_All //check
+    mov SP, #7FH										; Needed for interrupts to work
+    setb EA												; Enable master interrupt
+    lcall Receive_Serial
+    lcall Initialize_All ;check
     setb P0.0 ; Pin is used as input for timer 2
     setb P0.1 ; Pin is used as input for timer 1
-    jb mf, Guessing_Game
+    setb SEED_GENERATOR
+    clr SOUND_OUT
+    jb game_or_guess, Jump_To_Guessing_Game
+    sjmp Sound_Off
+    
+Jump_To_Guessing_Game:
+	ljmp Guessing_Game
     
 Sound_Off:
-    clr game
     lcall Initial_Seed
     setb ET2
+    clr lockout
     Set_Cursor(1, 1)
     Send_Constant_String(#Initial_Message_Top)
     Set_Cursor(2, 1)
     Send_Constant_String(#Initial_Message_Bottom)
-    mov player1, #0
-    mov player2, #0
+    mov player1, #0x00
+    mov player2, #0x00
     
 Sound_Off_Forever:
     lcall Random
-    mov a, Seed+1
+    mov a, Seed+0
     mov c, acc.3
-    mov tone, c
     jc Tone_High
 
 Tone_Low:
@@ -300,35 +305,32 @@ Tone_Low:
 	mov RL0, #low(TIMER0_RELOAD_LOW)
     clr inc_or_dec
     lcall Wait_Random
-    setb TR0
+    clr Go_To_Wait
     sjmp Tone_Off
 
 Tone_High:
     mov TH0, #high(TIMER0_RELOAD_HIGH)
-    mov TL0, #high(TIMER0_RELOAD_HIGH)
+    mov TL0, #low(TIMER0_RELOAD_HIGH)
     ; Set autoreload value
 	mov RH0, #high(TIMER0_RELOAD_HIGH)
 	mov RL0, #low(TIMER0_RELOAD_HIGH)
     setb inc_or_dec
     lcall Wait_Random
-    setb TR0
-    sjmp Tone_Off
-
+    clr Go_To_Wait
+    
 Tone_Off:
-    Wait_Milli_Seconds(#255)
-    Wait_Milli_Seconds(#255)
-    Wait_Milli_Seconds(#100)
+	setb TR0
+	Wait_Milli_Seconds(#100)
     clr TR0
 
 Wait_For_Input_SO:
     setb Go_To_Wait
     mov TH0, #high(TIMER0_RELOAD_WAIT)
 	mov TL0, #low(TIMER0_RELOAD_WAIT)
-    mov RH0, #0
-    mov RL0, #0
+    mov RH0, #high(TIMER0_RELOAD_WAIT)
+    mov RL0, #low(TIMER0_RELOAD_WAIT)
     mov T0ov+0, #0
     mov T0ov+1, #0
-    clr TF0
     setb TR0
 
 Waiting_SO:
@@ -390,19 +392,14 @@ Measure2_TR2:
     jnb P0.0, Measure2_TR2
     clr TR2
 
-    mov x+0, TL1
-    mov x+1, TH1
-    mov x+2, T1ov+0
-    mov x+3, T1ov+1
-    Load_y(STEADY_STATE)
-    lcall x_gt_y
-    setb score_to_update
-    jb mf, Done_Waiting
+	; add bac the code here
 
     mov x+0, TL2
     mov x+1, TH2
     mov x+2, T2ov+0
     mov x+3, T2ov+1
+	Load_y(45)
+	lcall mul32
     Load_y(STEADY_STATE)
     lcall x_gt_y
     clr score_to_update
@@ -410,67 +407,75 @@ Measure2_TR2:
     ljmp Still_Waiting
 
 Done_Waiting:
+	clr TR0
+	clr TF0
     jb score_to_update, Update_Player_1
 
 Update_Player_2:
+	Set_Cursor(2, 15)
+	Display_Char(#'2')
     lcall Incremement_Score_P2
+    
 Update_Display_Player_2:
     Set_Cursor(2, 11)
     Display_BCD(player2)
-    clr Go_To_Wait
+   	clr Go_To_Wait
     sjmp Still_Waiting
 
 Incremement_Score_P2:
     jnb inc_or_dec, Decrement_Score_P2
-    inc player2
+    mov a, player2
+    inc a
+    mov player2, a
     ret
 
 Decrement_Score_P2:
-    dec player2
-    sjmp Update_Display_Player_2
+    mov a, player2
+    dec a
+    mov player2, a
+    ret
 
 Update_Player_1:
+	Set_Cursor(1, 15)
+	Display_Char(#'1')
     lcall Incremement_Score_P1
+    
 Update_Display_Player_1:
     Set_Cursor(1, 11)
     Display_BCD(player1)
-    clr Go_To_Wait
+   	clr Go_To_Wait
     sjmp Still_Waiting
 
 Incremement_Score_P1:
     jnb inc_or_dec, Decrement_Score_P1
-    inc player1
+    mov a, player1
+    add a, #0x01
+    da a
+    mov player1, a
     ret
 
 Decrement_Score_P1:
-    dec player1
-    sjmp Update_Display_Player_1
-
-Still_Waiting:
-    jb Go_To_Wait, Waiting_SO
-; At this point, the periods are stored in their respective register
-; Determine what the steady state value is and compare the values
-; stored in the registers to this steady state value to see whether
-; either player should gain a point
-
-; Also, we need to add a variable that records which of the periods
-; exceeded the threshold first to determine who to give the point to
-
-; Also add something that makes the player not be able to add multiple
-; to their score. Clearing the Go_To_Wait bit might be the best way to
-; go about this
-
-Continue_SO:
-    clr TF0
-    clr TR0
-
     mov a, player1
-    cjne a, WINNING_SCORE, Check_Player2
+    add a, #0x99
+    da a
+    mov player1, a
+    ret
+Still_Waiting:
+    jb Go_To_Wait, Jump_To_Waiting_SO
+
+	sjmp Check_Player1   
+    
+Jump_To_Waiting_SO:
+	ljmp Waiting_SO
+
+Check_Player1:
+    mov a, player1
+    cjne a, #WINNING_SCORE, Check_Player2
     ljmp Player_1_Won
 
 Check_Player2:
     mov a, player2
-    cjne a, WINNING_SCORE, Game_Still_In_Progress
+    cjne a, #WINNING_SCORE, Game_Still_In_Progress
     ljmp Player_2_Won
 
 Game_Still_In_Progress:
@@ -478,20 +483,22 @@ Game_Still_In_Progress:
     Wait_Milli_Seconds(#255)
     Wait_Milli_Seconds(#255)
     ljmp Sound_Off_Forever
-
-
+    
 Player_1_Won:
     Set_Cursor(1, 1)
     Send_Constant_String(#Player1_Message)
-    sjmp Complete
+    Set_Cursor(2, 1)
+    Send_Constant_String(#Clear)
+    ljmp Complete
 
 Player_2_Won:
     Set_Cursor(2, 1)
     Send_Constant_String(#Player2_Message)
-    sjmp Complete
+    Set_Cursor(1, 1)
+    Send_Constant_String(#Clear)
+    ljmp Complete
     
 Guessing_Game:
-    setb game
     clr Go_To_Wait
 	lcall Initial_Seed
     setb ET2
@@ -499,76 +506,125 @@ Guessing_Game:
     Send_Constant_String(#Guess_Player_Message)
     Set_Cursor(2, 1)
     Send_Constant_String(#Lives_Message)
-    mov guess_score, #0
-    mov lives_left, #3
+    mov guess_score, #0x00
+    mov lives_left, #0x03
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
+    Wait_Milli_Seconds(#255)
 
 Guessing_Game_Forever:
     lcall Random
-    mov a, Seed+1
+    mov a, Seed+0
     mov c, acc.3
     mov direction, c
-    mov TH0, #high(TIMER0_RELOAD_LOW)
-	mov TL0, #low(TIMER0_RELOAD_LOW)
-	mov RH0, #high(TIMER0_RELOAD_LOW)
-	mov RL0, #low(TIMER0_RELOAD_LOW)
+    mov TH0, #high(TIMER0_RELOAD_HIGH)
+	mov TL0, #low(TIMER0_RELOAD_HIGH)
+	mov RH0, #high(TIMER0_RELOAD_HIGH)
+	mov RL0, #low(TIMER0_RELOAD_HIGH)
+    clr lockout
+	clr Go_To_Wait
+	clr ET1
+    clr TF1
     setb TR0
     Wait_Milli_Seconds(#255)
     Wait_Milli_Seconds(#100)
     clr TR0
-    jc Servo_Right
-    sjmp Servo_Left
+    setb lockout
+    
+Wait_For_Input_GG:
+    lcall Receive_Serial
+    clr TR1
+    clr TF1
+    mov TMOD, #01H
+    jc Right
+    sjmp Left
+   
+Right:
+	lcall Servo_Right
+	ljmp Update_Score
+	
+Left:
+	lcall Servo_Left
+	ljmp Update_Score
 
 Servo_Right:
-    mov TH2, #high(TIMER2_RELOAD_RIGHT)
-    mov TL2, #low(TIMER2_RELOAD_RIGHT)
-    mov RCAP2H, #high(TIMER2_RELOAD_RIGHT)
-	mov RCAP2L, #low(TIMER2_RELOAD_RIGHT)
-    setb TR2
-    sjmp Wait_For_Input_GG
+	mov TH0, #0FCH
+	mov TL0, #19H
+	mov RH0, #0
+	mov RL0, #0
+	setb SERVO
+	setb TR0
+	
+Wait_GG_Right:
+	jnb TF0, Wait_GG_Right
+	clr SERVO
+	clr TF0
+	clr TR0
+	ret
 
 Servo_Left:
-    mov TH2, #high(TIMER2_RELOAD_LEFT)
-    mov TL2, #low(TIMER2_RELOAD_LEFT)
-    mov RCAP2H, #high(TIMER2_RELOAD_LEFT)
-	mov RCAP2L, #low(TIMER2_RELOAD_LEFT)
-    setb TR2
-    sjmp Wait_For_Input_GG
+    mov TH0, #0F8H
+	mov TL0, #31H
+	mov RH0, #0
+	mov RL0, #0
+	setb SERVO
+	setb TR0
+    
+Wait_GG_Left:
+	jnb TF0, Wait_GG_Left
+	clr SERVO
+	clr TF0
+	clr TR0
+	ret
 
-Wait_For_Input_GG:
-    setb Go_To_Wait
-    mov TH0, #high(TIMER0_RELOAD_WAIT)
-	mov TL0, #low(TIMER0_RELOAD_WAIT)
-    mov RH0, #0
-    mov RL0, #0
-    mov T0ov+0, #0
-    mov T0ov+1, #0
-    clr TF0
-    setb TR0
+Update_Score:
+    mov a, game_or_guess
+    cjne a, direction, Take_Life
 
-Waiting_GG:
-    clr TR1
-    mov TL1, #0
-    mov TH1, #0
-    mov T1ov+0, #0
-    mov T1ov+1, #0
-    clr TF1
-    setb TR1
+Add_To_Score:
+    mov a, guess_score
+    add a, #0x01
+    da a
+    mov guess_score, a
+    mov a, lives_left
+    da a
+    mov lives_left, a
+    Set_Cursor(1, 15)
+    Display_BCD(guess_score)
+    Set_Cursor(2, 13)
+    Display_BCD(lives_left)
+	ljmp Guessing_Game_Forever
+	
+Take_Life:
+    mov a, lives_left
+    add a, #0x99
+    da a
+    mov lives_left, a
+    mov a, guess_score
+    da a
+    mov guess_score, a
+    Set_Cursor(1, 15)
+    Display_BCD(guess_score)
+    Set_Cursor(2, 13)
+    Display_BCD(lives_left)
+    mov a, lives_left
+    cjne a, #0x00, Game_Not_Lost
+    sjmp Game_Lost
 
-Synch1_GG:
-    jb P0.4, Synch1_GG
+Game_Not_Lost:
+	ljmp Guessing_Game_Forever
 
-Synch2_GG:
-    jnb P0.4, Synch2_GG
-
-
-d
-    jb Go_To_Wait, Waiting_GG
-
-Continue_GG:
-    clr TF0
-    clr TR0
-
-
+Game_Lost:
+    Set_Cursor(2, 1)
+    Send_Constant_String(#Clear)
+    Set_Cursor(1, 1)
+    Send_Constant_String(#Lost)
+    
 Complete:
     sjmp Complete
 end
