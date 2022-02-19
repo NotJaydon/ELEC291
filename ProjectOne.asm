@@ -16,7 +16,7 @@ TIMER2_SERVO_LEFT     EQU 1000
 TIMER2_RELOAD_RIGHT   EQU ((65536-(CLK/TIMER2_SERVO_RIGHT)))
 TIMER2_RELOAD_LEFT    EQU ((65536-(CLK/TIMER2_RELOAD_LEFT)))
 STEADY_STATE          EQU 73000000
-WINNING_SCORE         EQU 5
+WINNING_SCORE         EQU 0x65
 SOUND_OUT             EQU P1.1
 SEED_GENERATOR        EQU P4.5
 SERVO                 EQU P0.3	; may need to set this
@@ -44,12 +44,12 @@ Seed: ds 4
 bcd: ds 5
 T2ov: ds 2
 T1ov: ds 2
-T0ov: ds 0
+T0ov: ds 2
 player1: ds 1
 player2: ds 1
 lives_left: ds 1
 guess_score: ds 1
-test: ds 1
+hold_bcd: ds 1
 
 BSEG
 tone: dbit 1
@@ -78,8 +78,8 @@ LCD_D6 equ P3.6
 LCD_D7 equ P3.7
 
 
-Initial_Message_Top:    db 'Player 1: 00', 0
-Initial_Message_Bottom: db 'Player 2: 00', 0
+Initial_Message_Top:    db 'Player 1:', 0
+Initial_Message_Bottom: db 'Player 2:', 0
 Clear:                  db '                ', 0
 Player1_Message:        db 'Player One Won!', 0
 Player2_Message:        db 'Player Two Won!', 0
@@ -130,9 +130,9 @@ Waiting_Period:
 
 Compare:
     mov a, T0ov+0
-    cjne a, #low(3000), Timer0_ISR_Done
+    cjne a, #low(1500), Timer0_ISR_Done
     mov a, T0ov+1
-    cjne a, #high(3000), Timer0_ISR_Done
+    cjne a, #high(1500), Timer0_ISR_Done
     clr Go_To_Wait
     clr TR0
     clr TF0
@@ -252,12 +252,12 @@ Receive_Serial:
 	mov TMOD, #20H										; Timer 1 in mode 2 (auto reload)
 	mov TH1, #-6										; 115200 baud rate with our crystal
 	mov SCON, #50H										; Start bit is 0, Stop bit is 1, Rece
-	setb TR1											; start timer 1 for the generation of the baud rate
+	setb TR1											; Start timer 1 for the generation of the baud rate
 Wait:
-	jnb RI, Wait
-	mov a, SBUF
+	jnb RI, Wait										; Wait for the interrupt flag to be raised that indicates that a byte has been read
+	mov a, SBUF											; Move the contents of the serial buffer into acc
     jnz Update_Game_Or_Guess
-    clr game_or_guess
+    clr game_or_guess									; In this case, this variable is set or cleared depending on the value received from the buffer to choose the game
     ret
     
 Update_Game_Or_Guess:
@@ -269,12 +269,13 @@ Start:
     mov SP, #7FH										; Needed for interrupts to work
     setb EA												; Enable master interrupt
     lcall Receive_Serial
-    lcall Initialize_All ;check
-    setb P0.0 ; Pin is used as input for timer 2
-    setb P0.1 ; Pin is used as input for timer 1
-    setb SEED_GENERATOR
-    clr SOUND_OUT
-    jb game_or_guess, Jump_To_Guessing_Game
+    lcall Initialize_All
+    setb P0.0 											; Pin is used as input for timer 2
+    setb P2.0 											; Pin is used as input for timer 1
+    setb SEED_GENERATOR									; Pin used as input for the seed generator push button
+    clr SOUND_OUT										; Pin used for the speaker output
+    setb ET2											; Enable the timer 2 interrupt (it was cleared for the seed generation)
+    jb game_or_guess, Jump_To_Guessing_Game				; Bit variable determines which game has been selected
     sjmp Sound_Off
     
 Jump_To_Guessing_Game:
@@ -282,14 +283,13 @@ Jump_To_Guessing_Game:
     
 Sound_Off:
     lcall Initial_Seed
-    setb ET2
     clr lockout
     Set_Cursor(1, 1)
     Send_Constant_String(#Initial_Message_Top)
     Set_Cursor(2, 1)
     Send_Constant_String(#Initial_Message_Bottom)
-    mov player1, #0x00
-    mov player2, #0x00
+	mov player2, #0
+	mov player1, #0
     
 Sound_Off_Forever:
     lcall Random
@@ -300,7 +300,6 @@ Sound_Off_Forever:
 Tone_Low:
     mov TH0, #high(TIMER0_RELOAD_LOW)
 	mov TL0, #low(TIMER0_RELOAD_LOW)
-	; Set autoreload value
 	mov RH0, #high(TIMER0_RELOAD_LOW)
 	mov RL0, #low(TIMER0_RELOAD_LOW)
     clr inc_or_dec
@@ -311,7 +310,6 @@ Tone_Low:
 Tone_High:
     mov TH0, #high(TIMER0_RELOAD_HIGH)
     mov TL0, #low(TIMER0_RELOAD_HIGH)
-    ; Set autoreload value
 	mov RH0, #high(TIMER0_RELOAD_HIGH)
 	mov RL0, #low(TIMER0_RELOAD_HIGH)
     setb inc_or_dec
@@ -343,10 +341,10 @@ Waiting_SO:
     setb TR1
 
 Synch1_TR1:
-    jb P0.1, Synch1_TR1
+    jb P2.0, Synch1_TR1
 
 Synch2_TR1:
-    jnb P0.1, Synch2_TR1
+    jnb P2.0, Synch2_TR1
 
     clr TR1
     mov TL1, #0
@@ -357,11 +355,12 @@ Synch2_TR1:
     setb TR1
 
 Measure1_TR1:
-    jb P0.1, Measure1_TR1
+    jb P2.0, Measure1_TR1
 
 Measure2_TR1:
-    jnb P0.1, Measure2_TR1
+    jnb P2.0, Measure2_TR1
     clr TR1
+    clr TF1
 
     clr TR2
     mov TL2, #0
@@ -391,8 +390,18 @@ Measure1_TR2:
 Measure2_TR2:
     jnb P0.0, Measure2_TR2
     clr TR2
+    clr TF2
 
-	; add bac the code here
+    mov x+0, TL1
+    mov x+1, TH1
+    mov x+2, T1ov+0
+    mov x+3, T1ov+1
+    Load_y(45)
+    lcall mul32
+    Load_y(STEADY_STATE)
+    lcall x_gt_y
+    setb score_to_update
+    jb mf, Done_Waiting
 
     mov x+0, TL2
     mov x+1, TH2
@@ -412,59 +421,61 @@ Done_Waiting:
     jb score_to_update, Update_Player_1
 
 Update_Player_2:
-	Set_Cursor(2, 15)
-	Display_Char(#'2')
-    lcall Incremement_Score_P2
+    ;lcall Incremement_Score_P2
     
-Update_Display_Player_2:
-    Set_Cursor(2, 11)
-    Display_BCD(player2)
-   	clr Go_To_Wait
-    sjmp Still_Waiting
+;Update_Display_Player_2:
+    ;Set_Cursor(2, 11)
+    ;Display_BCD(player2)
+    ;ljmp Game_Still_In_Progress
 
 Incremement_Score_P2:
     jnb inc_or_dec, Decrement_Score_P2
-    mov a, player2
-    inc a
-    mov player2, a
-    ret
+    Set_Cursor(2, 15)
+	Display_Char(#'2')
+	inc player2
+    Set_Cursor(2, 11)
+    Display_BCD(player2)
+    ljmp Game_Still_In_Progress
 
 Decrement_Score_P2:
-    mov a, player2
-    dec a
-    mov player2, a
-    ret
+    Set_Cursor(2, 15)
+	Display_Char(#'1')
+	dec player2
+    Set_Cursor(2, 11)
+    Display_BCD(player2)
+    ljmp Game_Still_In_Progress
 
 Update_Player_1:
 	Set_Cursor(1, 15)
 	Display_Char(#'1')
-    lcall Incremement_Score_P1
+    ;lcall Incremement_Score_P1
     
-Update_Display_Player_1:
-    Set_Cursor(1, 11)
-    Display_BCD(player1)
-   	clr Go_To_Wait
-    sjmp Still_Waiting
+;Update_Display_Player_1:
+    ;Set_Cursor(1, 11)
+    ;Display_BCD(player1)
+    ;ljmp Game_Still_In_Progress
 
 Incremement_Score_P1:
     jnb inc_or_dec, Decrement_Score_P1
-    mov a, player1
-    add a, #0x01
-    da a
-    mov player1, a
-    ret
+    Set_Cursor(1, 15)
+	Display_Char(#'2')
+	inc player1
+    Set_Cursor(1, 11)
+    Display_BCD(player1)
+    ljmp Game_Still_In_Progress
 
 Decrement_Score_P1:
-    mov a, player1
-    add a, #0x99
-    da a
-    mov player1, a
-    ret
+    Set_Cursor(1, 15)
+	Display_Char(#'1')
+	dec player2
+    Set_Cursor(1, 11)
+    Display_BCD(player1)
+    ljmp Game_Still_In_Progress
+    
 Still_Waiting:
     jb Go_To_Wait, Jump_To_Waiting_SO
+    sjmp Check_Player1
 
-	sjmp Check_Player1   
-    
 Jump_To_Waiting_SO:
 	ljmp Waiting_SO
 
@@ -479,9 +490,7 @@ Check_Player2:
     ljmp Player_2_Won
 
 Game_Still_In_Progress:
-    Wait_Milli_Seconds(#255)
-    Wait_Milli_Seconds(#255)
-    Wait_Milli_Seconds(#255)
+    clr Go_To_Wait
     ljmp Sound_Off_Forever
     
 Player_1_Won:
