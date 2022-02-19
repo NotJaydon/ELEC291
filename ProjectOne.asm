@@ -19,7 +19,7 @@ STEADY_STATE          EQU 73000000
 WINNING_SCORE         EQU 0x65
 SOUND_OUT             EQU P1.1
 SEED_GENERATOR        EQU P4.5
-SERVO                 EQU P0.3	; may need to set this
+SERVO                 EQU P0.3
 US_SENSOR             EQU P0.4
 
 ; Reset vector
@@ -130,9 +130,9 @@ Waiting_Period:
 
 Compare:
     mov a, T0ov+0
-    cjne a, #low(1500), Timer0_ISR_Done
+    cjne a, #low(3000), Timer0_ISR_Done
     mov a, T0ov+1
-    cjne a, #high(1500), Timer0_ISR_Done
+    cjne a, #high(3000), Timer0_ISR_Done
     clr Go_To_Wait
     clr TR0
     clr TF0
@@ -288,27 +288,27 @@ Sound_Off:
     Send_Constant_String(#Initial_Message_Top)
     Set_Cursor(2, 1)
     Send_Constant_String(#Initial_Message_Bottom)
-	mov player2, #0
-	mov player1, #0
+	mov player2, #0										; Initialize player 2 score to 0
+	mov player1, #0										; Initialize player 1 score to 0
     
 Sound_Off_Forever:
-    lcall Random
+    lcall Random										; Generate a random seed	
     mov a, Seed+0
     mov c, acc.3
-    jc Tone_High
+    jc Tone_High										; Set carry to a random bit in accumulator so that the tone played is random
 
 Tone_Low:
-    mov TH0, #high(TIMER0_RELOAD_LOW)
+    mov TH0, #high(TIMER0_RELOAD_LOW)					; Set timer 0 so that it plays the low frequency tone
 	mov TL0, #low(TIMER0_RELOAD_LOW)
 	mov RH0, #high(TIMER0_RELOAD_LOW)
 	mov RL0, #low(TIMER0_RELOAD_LOW)
-    clr inc_or_dec
-    lcall Wait_Random
-    clr Go_To_Wait
+    clr inc_or_dec										; inc_or_dec responsible for determining whether the player that hit the pad deserves to lose a point or gain a point
+    lcall Wait_Random									; Wait a random period of time
+    clr Go_To_Wait										; Determines whether the timer 1 ISR will be used for waiting or playing the transducer
     sjmp Tone_Off
 
 Tone_High:
-    mov TH0, #high(TIMER0_RELOAD_HIGH)
+    mov TH0, #high(TIMER0_RELOAD_HIGH)					; Set timer 0 so that it plays the high frequency tone
     mov TL0, #low(TIMER0_RELOAD_HIGH)
 	mov RH0, #high(TIMER0_RELOAD_HIGH)
 	mov RL0, #low(TIMER0_RELOAD_HIGH)
@@ -318,22 +318,22 @@ Tone_High:
     
 Tone_Off:
 	setb TR0
-	Wait_Milli_Seconds(#100)
+	Wait_Milli_Seconds(#100)							; Play the tone for 100 ms
     clr TR0
 
 Wait_For_Input_SO:
-    setb Go_To_Wait
-    mov TH0, #high(TIMER0_RELOAD_WAIT)
-	mov TL0, #low(TIMER0_RELOAD_WAIT)
+    setb Go_To_Wait										; Now timer 0 will be used for waiting by comparing the value of the overflow variable with 3000 (3s)
+    mov TH0, #high(TIMER0_RELOAD_WAIT)					; Set timer 0 to overflow every 1 ms and the ovf var will be compared to 3000 (3s) 
+	mov TL0, #low(TIMER0_RELOAD_WAIT)					
     mov RH0, #high(TIMER0_RELOAD_WAIT)
     mov RL0, #low(TIMER0_RELOAD_WAIT)
-    mov T0ov+0, #0
+    mov T0ov+0, #0										; Reset the timer 0 overflow variable
     mov T0ov+1, #0
     setb TR0
 
 Waiting_SO:
-    clr TR1
-    mov TL1, #0
+    clr TR1												; Prepare timer 1 so that it can be synchronized to P1's 555 timer
+    mov TL1, #0											
     mov TH1, #0
     mov T1ov+0, #0
     mov T1ov+1, #0
@@ -341,12 +341,12 @@ Waiting_SO:
     setb TR1
 
 Synch1_TR1:
-    jb P2.0, Synch1_TR1
+    jb P2.0, Synch1_TR1									; Synchronization period
 
 Synch2_TR1:
     jnb P2.0, Synch2_TR1
-
-    clr TR1
+    								
+    clr TR1												; Prepare timer 1 so that it can be used to measure the period of P1's 555 timer output			
     mov TL1, #0
     mov TH1, #0
     mov T1ov+0, #0
@@ -355,15 +355,15 @@ Synch2_TR1:
     setb TR1
 
 Measure1_TR1:
-    jb P2.0, Measure1_TR1
+    jb P2.0, Measure1_TR1								; Measurement period
 
 Measure2_TR1:
     jnb P2.0, Measure2_TR1
     clr TR1
     clr TF1
 
-    clr TR2
-    mov TL2, #0
+    clr TR2												; Same thing as discussed previously for timer 1, but in this case, applied to timer 2
+    mov TL2, #0											; which is associated with P2's 555 timer output
     mov TH2, #0
     mov T2ov+0, #0
     mov T2ov+1, #0
@@ -392,122 +392,112 @@ Measure2_TR2:
     clr TR2
     clr TF2
 
-    mov x+0, TL1
-    mov x+1, TH1
+    mov x+0, TL1										; Calculate timer 1 raw period and compare it to see if it exceeds the threshold value
+    mov x+1, TH1										; that occurs when player 1 has hit the pad
     mov x+2, T1ov+0
     mov x+3, T1ov+1
     Load_y(45)
     lcall mul32
     Load_y(STEADY_STATE)
-    lcall x_gt_y
-    setb score_to_update
-    jb mf, Done_Waiting
+    lcall x_gt_y										; Comparison
+    setb score_to_update								; If player 1 hit the pad, the score to update will be associated with them
+    jb mf, Done_Waiting									; If player 1 hit the pad, we want to leave the waiting loop
 
-    mov x+0, TL2
+    mov x+0, TL2										; Calculate timer 2 raw period for the same reason. 
     mov x+1, TH2
     mov x+2, T2ov+0
     mov x+3, T2ov+1
 	Load_y(45)
 	lcall mul32
     Load_y(STEADY_STATE)
-    lcall x_gt_y
-    clr score_to_update
-    jb mf, Done_Waiting
-    ljmp Still_Waiting
+    lcall x_gt_y										; Comparison
+    clr score_to_update									; If player 2 hit the pad, the score to update will be associated with them
+    jb mf, Done_Waiting									; If player 1 hit the pad, we want to leave the waiting loop
+    ljmp Still_Waiting									; If no one hit the pad, we restart the waiting loop
 
 Done_Waiting:
 	clr TR0
 	clr TF0
-    jb score_to_update, Update_Player_1
-
+    jb score_to_update, Update_Player_1					; If Player 1 hit the pad, score_to_update would have been set so we know that we
+														; have to update player 1's score
 Update_Player_2:
-    ;lcall Incremement_Score_P2
-    
-;Update_Display_Player_2:
-    ;Set_Cursor(2, 11)
-    ;Display_BCD(player2)
-    ;ljmp Game_Still_In_Progress
 
-Incremement_Score_P2:
-    jnb inc_or_dec, Decrement_Score_P2
-    Set_Cursor(2, 15)
-	Display_Char(#'2')
-	inc player2
+Incremement_Score_P2:									
+    jnb inc_or_dec, Decrement_Score_P2					; If player 2 hit the pad when a low tone was played, inc_or_dec would be 0 and it would jump to the decremenet routine
+	inc player2											; Increment player 2's score if they hit the pad on the high tone
     Set_Cursor(2, 11)
     Display_BCD(player2)
-    ljmp Game_Still_In_Progress
+    ljmp Check_Player2									; Increment score and restart. If player 2 matches the winning score it will update in the next cycle
 
 Decrement_Score_P2:
-    Set_Cursor(2, 15)
-	Display_Char(#'1')
+	mov a, player2
+	cjne a, #0, Continue_Decrement_P2					; Check to see that score is not 0 and if it is, then do not decrement and start a new cycle
+	ljmp Check_Player2
+	
+Continue_Decrement_P2:
 	dec player2
     Set_Cursor(2, 11)
     Display_BCD(player2)
-    ljmp Game_Still_In_Progress
+    ljmp Check_Player2
 
 Update_Player_1:
-	Set_Cursor(1, 15)
-	Display_Char(#'1')
-    ;lcall Incremement_Score_P1
-    
-;Update_Display_Player_1:
-    ;Set_Cursor(1, 11)
-    ;Display_BCD(player1)
-    ;ljmp Game_Still_In_Progress
 
 Incremement_Score_P1:
-    jnb inc_or_dec, Decrement_Score_P1
+    jnb inc_or_dec, Decrement_Score_P1					; Same idea as above for handling player 2's score
     Set_Cursor(1, 15)
 	Display_Char(#'2')
 	inc player1
     Set_Cursor(1, 11)
     Display_BCD(player1)
-    ljmp Game_Still_In_Progress
+    ljmp Check_Player1
 
 Decrement_Score_P1:
-    Set_Cursor(1, 15)
-	Display_Char(#'1')
-	dec player2
+	mov a, player1
+	cjne a, #0, Continue_Decrement_P1
+	ljmp Check_Player1
+	
+Continue_Decrement_P1:
+	dec player1
     Set_Cursor(1, 11)
     Display_BCD(player1)
-    ljmp Game_Still_In_Progress
+    ljmp Check_Player1
     
-Still_Waiting:
-    jb Go_To_Wait, Jump_To_Waiting_SO
-    sjmp Check_Player1
+Still_Waiting:											
+    jb Go_To_Wait, Jump_To_Waiting_SO					; If no one hit the pad, then we are still in the waiting loop
+    sjmp Check_Player1									; If there was a timeout, then just fall through to the check player routines
 
 Jump_To_Waiting_SO:
-	ljmp Waiting_SO
+	ljmp Waiting_SO										; Restart waiting loop
 
-Check_Player1:
+Check_Player1:											; Check if player 1 has won
     mov a, player1
     cjne a, #WINNING_SCORE, Check_Player2
     ljmp Player_1_Won
 
-Check_Player2:
+Check_Player2:											; Check if player 2 has won
     mov a, player2
     cjne a, #WINNING_SCORE, Game_Still_In_Progress
     ljmp Player_2_Won
 
-Game_Still_In_Progress:
+Game_Still_In_Progress:									; Restart cycle to play new tone
     clr Go_To_Wait
     ljmp Sound_Off_Forever
     
-Player_1_Won:
+Player_1_Won:											; If player 1 has won, then display the appropriate message
     Set_Cursor(1, 1)
     Send_Constant_String(#Player1_Message)
     Set_Cursor(2, 1)
     Send_Constant_String(#Clear)
     ljmp Complete
 
-Player_2_Won:
+Player_2_Won:											; If player 2 has won, then display the appropriate message
     Set_Cursor(2, 1)
     Send_Constant_String(#Player2_Message)
     Set_Cursor(1, 1)
     Send_Constant_String(#Clear)
     ljmp Complete
     
-Guessing_Game:
+Guessing_Game:											; The second of our two games
     clr Go_To_Wait
 	lcall Initial_Seed
     setb ET2
